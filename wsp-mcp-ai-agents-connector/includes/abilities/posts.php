@@ -42,6 +42,34 @@ function wsp_execute_get_post( $input ) {
     );
 }
 
+/**
+ * Build post_date / post_date_gmt args from an optional ISO 8601 "date" input.
+ * Returns WP_Error when status is "future" but no future date is available,
+ * because WordPress would otherwise publish the post immediately.
+ */
+function wsp_mcp_post_date_args( $input, $status, $post = null ) {
+    $args = array();
+    $ts   = 0;
+    if ( isset( $input['date'] ) && '' !== trim( (string) $input['date'] ) ) {
+        $dt = date_create( sanitize_text_field( wp_unslash( $input['date'] ) ), wp_timezone() );
+        if ( ! $dt ) {
+            return new WP_Error( 'invalid_date', 'Could not parse "date". Use ISO 8601 in the site timezone, e.g. 2026-06-09T08:00:00.' );
+        }
+        $ts   = $dt->getTimestamp();
+        $args = array(
+            'post_date'     => $dt->setTimezone( wp_timezone() )->format( 'Y-m-d H:i:s' ),
+            'post_date_gmt' => gmdate( 'Y-m-d H:i:s', $ts ),
+            'edit_date'     => true,
+        );
+    } elseif ( $post && '0000-00-00 00:00:00' !== $post->post_date_gmt ) {
+        $ts = strtotime( $post->post_date_gmt . ' UTC' );
+    }
+    if ( 'future' === $status && $ts <= time() ) {
+        return new WP_Error( 'invalid_date', 'Status "future" requires a "date" in the future; otherwise WordPress publishes the post immediately.' );
+    }
+    return $args;
+}
+
 function wsp_execute_create_post( $input ) {
     $args = array(
         'post_title'   => sanitize_text_field( wp_unslash( $input['title'] ) ),
@@ -52,10 +80,13 @@ function wsp_execute_create_post( $input ) {
     if ( ! empty( $input['excerpt'] ) )    $args['post_excerpt']  = sanitize_text_field( wp_unslash( $input['excerpt'] ) );
     if ( ! empty( $input['slug'] ) )       $args['post_name']     = sanitize_title( $input['slug'] );
     if ( ! empty( $input['categories'] ) ) $args['post_category'] = array_map( 'intval', $input['categories'] );
+    $date_args = wsp_mcp_post_date_args( $input, $args['post_status'] );
+    if ( is_wp_error( $date_args ) ) return array( 'success' => false, 'error' => $date_args->get_error_message() );
+    $args = array_merge( $args, $date_args );
     $id = wp_insert_post( $args, true );
     if ( is_wp_error( $id ) ) return array( 'success' => false, 'error' => $id->get_error_message() );
     if ( ! empty( $input['tags'] ) ) wp_set_post_tags( $id, array_map( 'intval', $input['tags'] ) );
-    return array( 'success' => true, 'id' => $id, 'url' => get_permalink( $id ), 'status' => $args['post_status'] );
+    return array( 'success' => true, 'id' => $id, 'url' => get_permalink( $id ), 'status' => get_post_status( $id ), 'date' => get_post_field( 'post_date', $id ) );
 }
 
 function wsp_execute_update_post( $input ) {
@@ -66,6 +97,12 @@ function wsp_execute_update_post( $input ) {
         if ( is_wp_error( $status_check ) ) return $status_check;
     }
     $args = array( 'ID' => $post->ID );
+    $target_status = isset( $input['status'] ) ? sanitize_key( $input['status'] ) : $post->post_status;
+    if ( isset( $input['status'] ) || isset( $input['date'] ) ) {
+        $date_args = wsp_mcp_post_date_args( $input, $target_status, $post );
+        if ( is_wp_error( $date_args ) ) return $date_args;
+        $args = array_merge( $args, $date_args );
+    }
     if ( isset( $input['title'] ) )      $args['post_title']    = sanitize_text_field( wp_unslash( $input['title'] ) );
     if ( isset( $input['content'] ) )    $args['post_content']  = wp_kses_post( wp_unslash( $input['content'] ) );
     if ( isset( $input['status'] ) )     $args['post_status']   = sanitize_text_field( wp_unslash( $input['status'] ) );
@@ -73,7 +110,7 @@ function wsp_execute_update_post( $input ) {
     $id = wp_update_post( $args, true );
     if ( is_wp_error( $id ) ) return array( 'success' => false, 'error' => $id->get_error_message() );
     if ( isset( $input['tags'] ) ) wp_set_post_tags( $id, array_map( 'intval', $input['tags'] ) );
-    return array( 'success' => true, 'id' => $id, 'url' => get_permalink( $id ) );
+    return array( 'success' => true, 'id' => $id, 'url' => get_permalink( $id ), 'status' => get_post_status( $id ), 'date' => get_post_field( 'post_date', $id ) );
 }
 
 function wsp_execute_delete_post( $input ) {
